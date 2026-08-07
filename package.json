@@ -2,7 +2,7 @@
   "name": "findajob-qa",
   "version": "1.0.0",
   "description": "FindAJob.qa — Qatar Job Portal Backend",
-  "main": "server_1786088928546.js",
+  "main": "server.js",
   "scripts": {
     "start": "node server_1786088928546.js",
     "dev": "nodemon server_1786088928546.js"
