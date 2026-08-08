@@ -227,10 +227,14 @@ CREATE TABLE IF NOT EXISTS employer_profiles (
   about         TEXT,
   photo_path    TEXT,
   photo_url     TEXT,
+  online        BOOLEAN DEFAULT false,
+  last_seen_at  TIMESTAMPTZ,
   created_at    TIMESTAMPTZ DEFAULT now(),
   updated_at    TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_employer_profiles_email ON employer_profiles(email);
+ALTER TABLE employer_profiles ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT false;
+ALTER TABLE employer_profiles ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS application_comments (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -256,6 +260,47 @@ CREATE TABLE IF NOT EXISTS application_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_application_documents_application ON application_documents(application_id);
 
+-- ═══════════════════════════════════════════════════════════════
+-- CHAT: encrypted messages, private attachments, and presence
+-- ═══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  application_id     UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  sender_role        TEXT NOT NULL CHECK (sender_role IN ('applicant','employer','admin','system')),
+  sender_name        TEXT NOT NULL,
+  sender_email       TEXT,
+  body               TEXT,
+  body_ciphertext    TEXT,
+  encryption_iv      TEXT,
+  is_encrypted       BOOLEAN DEFAULT true,
+  message_type       TEXT NOT NULL DEFAULT 'text',
+  faq_key            TEXT,
+  link_url           TEXT,
+  link_title         TEXT,
+  link_description   TEXT,
+  attachment_path    TEXT,
+  attachment_bucket  TEXT,
+  attachment_name    TEXT,
+  attachment_type    TEXT,
+  attachment_size    INTEGER,
+  created_at         TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_application ON chat_messages(application_id, created_at);
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS faq_key TEXT;
+
+CREATE TABLE IF NOT EXISTS chat_presence (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  application_id   UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  participant_key   TEXT NOT NULL,
+  role             TEXT NOT NULL CHECK (role IN ('applicant','employer','admin')),
+  display_name      TEXT,
+  online            BOOLEAN DEFAULT false,
+  typing            BOOLEAN DEFAULT false,
+  last_seen_at      TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(application_id, participant_key)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_presence_application ON chat_presence(application_id);
+
 CREATE TABLE IF NOT EXISTS contact_messages (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
@@ -277,33 +322,23 @@ CREATE TABLE IF NOT EXISTS job_alert_subscribers (
 --   employer-photos (public; applicant dashboards display profile photos)
 
 
--- ═══════════════════════════════════════════════════════════════
--- ROW LEVEL SECURITY (RLS)
--- Enable RLS and add policies
--- ═══════════════════════════════════════════════════════════════
-
--- Applications: publicly readable only by tracking number via API
--- (all actual access goes through server.js which uses service-role key)
-ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE status_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE employer_profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE application_comments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE application_documents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE contact_messages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE job_alert_subscribers ENABLE ROW LEVEL SECURITY;
-
--- Allow server (service role) to do everything
--- The service-role key bypasses RLS — use it in server.js only.
--- For public anon key (frontend-direct), lock everything down.
-
--- Public can read active jobs
-CREATE POLICY "Public read active jobs"
-  ON jobs FOR SELECT
-  USING (active = true);
-
--- Everything else handled server-side (server.js uses service-role key)
+-- RLS is intentionally disabled for this deployment. All access goes
+-- through server.js, which validates tracking references/employer email.
+-- Note: chat text is encrypted in the browser using a key derived from the
+-- tracking reference. This protects stored message content from casual
+-- database exposure, but it is not a full public-key E2EE system because
+-- the reference is also the applicant's access credential.
+ALTER TABLE applications DISABLE ROW LEVEL SECURITY;
+ALTER TABLE status_history DISABLE ROW LEVEL SECURITY;
+ALTER TABLE agents DISABLE ROW LEVEL SECURITY;
+ALTER TABLE jobs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE employer_profiles DISABLE ROW LEVEL SECURITY;
+ALTER TABLE application_comments DISABLE ROW LEVEL SECURITY;
+ALTER TABLE application_documents DISABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_messages DISABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_presence DISABLE ROW LEVEL SECURITY;
+ALTER TABLE contact_messages DISABLE ROW LEVEL SECURITY;
+ALTER TABLE job_alert_subscribers DISABLE ROW LEVEL SECURITY;
 ```
 
 ---
@@ -332,6 +367,7 @@ applications >── agents           (many applications → one agent)
 | `arrived`            | 9    | Arrived in Qatar                                |
 | `employed`           | 10   | Employment started                              |
 | `rejected`           | —    | Application rejected                            |
+| `cancelled`          | —    | Application cancelled                           |
 
 ---
 
@@ -342,6 +378,9 @@ applications >── agents           (many applications → one agent)
 | POST   | `/api/applications`                      | Public        | Submit new application            |
 | GET    | `/api/applications/check-email?email=`   | Public        | Check if email already applied    |
 | GET    | `/api/applications/track/:trackingNumber`| Public        | Get application status + timeline |
+| GET    | `/api/applications/track/:trackingNumber/messages` | Reference | Load the encrypted support chat |
+| POST   | `/api/applications/:trackingNumber/messages` | Reference/employer | Send encrypted message, link, or attachment |
+| POST   | `/api/applications/:trackingNumber/presence` | Reference/employer | Update online, last-seen, and typing state |
 | GET    | `/api/admin/applications`                | Admin         | List all applications             |
 | GET    | `/api/admin/applications/:id`            | Admin         | Get application detail            |
 | PUT    | `/api/admin/applications/:id/status`     | Admin         | Update status & add note          |
